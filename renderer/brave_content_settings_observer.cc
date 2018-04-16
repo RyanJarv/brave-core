@@ -6,6 +6,7 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "brave/common/render_messages.h"
+#include "brave/content/common/frame_messages.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
 #include "content/public/renderer/render_frame.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
@@ -25,14 +26,54 @@ BraveContentSettingsObserver::BraveContentSettingsObserver(
 BraveContentSettingsObserver::~BraveContentSettingsObserver() {
 }
 
+void BraveContentSettingsObserver::DidFinishLoad() {
+  temporarily_allowed_scripts_.clear();
+}
+
+bool BraveContentSettingsObserver::OnMessageReceived(const IPC::Message& message) {
+  bool handled = true;
+  IPC_BEGIN_MESSAGE_MAP(BraveContentSettingsObserver, message)
+    IPC_MESSAGE_HANDLER(BraveFrameMsg_AllowScriptsOnce, OnAllowScriptsOnce)
+    IPC_MESSAGE_UNHANDLED(handled = false)
+  IPC_END_MESSAGE_MAP()
+
+  return ContentSettingsObserver::OnMessageReceived(message);
+}
+
+void BraveContentSettingsObserver::OnAllowScriptsOnce(
+    const std::vector<std::string>& origins) {
+  temporarily_allowed_scripts_.insert(origins.begin(), origins.end());
+}
+
+bool BraveContentSettingsObserver::IsScriptTemporilyAllowed(
+    const GURL& script_url) {
+  // check if scripts from this origin are temporily allowed or not
+  return base::ContainsKey(temporarily_allowed_scripts_,
+      script_url.GetOrigin().spec());
+}
+
 void BraveContentSettingsObserver::BraveSpecificDidBlockJavaScript(
     const base::string16& details) {
   Send(new BraveViewHostMsg_JavaScriptBlocked(routing_id(), details));
 }
 
+bool BraveContentSettingsObserver::AllowScript(
+    bool enabled_per_settings) {
+  blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
+  if (frame && IsScriptTemporilyAllowed(
+        url::Origin(frame->GetDocument().GetSecurityOrigin()).GetURL())) {
+    return true;
+  }
+
+  return ContentSettingsObserver::AllowScript(enabled_per_settings);
+}
+
 bool BraveContentSettingsObserver::AllowScriptFromSource(
     bool enabled_per_settings,
     const blink::WebURL& script_url) {
+
+  if (IsScriptTemporilyAllowed(GURL(script_url))) return true;
+
   bool allow = ContentSettingsObserver::AllowScriptFromSource(
       enabled_per_settings, script_url);
   if (!allow) {
